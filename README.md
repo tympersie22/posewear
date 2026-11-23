@@ -1,3 +1,5 @@
+> This branch's primary documentation is [README.en.md](README.en.md). It builds an English-first interface with optional Kiswahili from pinned, authorized catalog sources. The original Chinese upstream documentation is retained below for attribution and audit context.
+
 <div align="center">
 
 <img src="docs/banner.jpg" alt="人像 + 姿势 + 服饰 = 成品" width="900">

@@ -14,14 +14,14 @@ async function call(target, headers = {}, withOrigin = true) {
   return { status: r.status, body: t.slice(0, 120) };
 }
 let r = await call('https://example.com:8443/v1/images/generations', { 'x-proxy-custom': '1' });
-ok('custom https 非443 端口放行', r.status !== 400 && !/标准 https|http\/https 地址/.test(r.body), r.status + ' ' + r.body);
+ok('custom https non-443 port rejected', r.status === 400, r.status + ' ' + r.body);
 r = await call('http://example.com:8080/v1/images/edits', { 'x-proxy-custom': '1' });
-ok('custom http 非443 端口放行', r.status !== 400 && !/标准 https|http\/https 地址/.test(r.body), r.status + ' ' + r.body);
+ok('custom plain HTTP rejected', r.status === 400, r.status + ' ' + r.body);
 r = await call('https://api.openai.com:8443/v1/images/generations', {});
 ok('官方域名带端口仍拒绝', r.status === 400, r.status + ' ' + r.body);
-r = await call('http://192.168.1.5:8188/v1/images/generations', { 'x-proxy-custom': '1' });
+r = await call('https://192.168.1.5/v1/images/generations', { 'x-proxy-custom': '1' });
 ok('自定义内网地址仍拒绝', r.status === 403, r.status + ' ' + r.body);
-r = await call('https://example.com:8443/v1/chat/completions', { 'x-proxy-custom': '1' });
+r = await call('https://example.com/v1/chat/completions', { 'x-proxy-custom': '1' });
 ok('自定义非图片路径仍拒绝', r.status === 403, r.status + ' ' + r.body);
 r = await call('https://example.com/v1/images/generations', { 'x-proxy-custom': '1' }, false);
 ok('无同源来源仍拒绝', r.status === 403, r.status + ' ' + r.body);

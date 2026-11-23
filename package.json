@@ -1,13 +1,16 @@
 {
   "name": "posewear",
   "private": true,
-  "description": "衣姿 PoseWear：姿势、服装、人像参考图库与 AI 试穿工作台",
+  "description": "PoseWear reference galleries and multi-provider AI try-on studio, English-first with Kiswahili",
   "license": "MIT",
   "scripts": {
-    "build": "python3 build.py",
-    "serve": "python3 -m http.server 8787 -d dist",
-    "test": "node tests/v12.js && node tests/v13.js",
-    "deploy": "wrangler pages deploy dist --project-name posewear"
+    "build": "python3 scripts/build-authorized.py",
+    "build:legacy": "python3 build.py",
+    "serve": "wrangler pages dev dist --port 8787",
+    "test": "node tests/v12.js && node tests/v13.js && node tests/v14-xai.js && node tests/v15-modules.js && node tests/v16-proxy.mjs",
+    "test:e2e": "node tests/i18n-parity.mjs",
+    "deploy:preview": "wrangler pages deploy dist --project-name posewear-en-sw --branch preview",
+    "deploy": "wrangler pages deploy dist --project-name posewear-en-sw --branch main"
   },
   "devDependencies": {
     "playwright": "^1.48.0",

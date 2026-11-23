@@ -1,45 +1,105 @@
-// 衣姿 PoseWear 转发代理（v10）：只转发、不记录、不存储任何请求内容或密钥。
-// 限制：① 只接受本站页面发起的请求（Origin / Referer 同源）；② 官方接口只走标准 https；
-// 自定义中转必须带 x-proxy-custom: 1 且路径符合图片接口格式，可用 http/https 任意端口（内网地址除外）；
-// ③ 结果图片只从官方结果 CDN 下载；④ 每 IP 频率限制。
-const API_PATH=/^\/(api\/v3|v\d+(beta|alpha)?)\/(images\/(edits|generations)|models(\/[^/]+(:generateContent)?)?)$/;
-const OFFICIAL=[/^api\.openai\.com$/,/^generativelanguage\.googleapis\.com$/,/^ark\.[a-z0-9-]+\.volces\.com$/,/^ark\.[a-z0-9-]+\.bytepluses\.com$/];
-const IMG_HOSTS=[/^oaidalleapiprodscus\.blob\.core\.windows\.net$/,/(^|\.)volces\.com$/,/(^|\.)bytepluses\.com$/,/(^|\.)googleusercontent\.com$/];
-const DROP=['host','x-target-url','x-proxy-kind','x-proxy-custom','cookie','origin','referer','x-forwarded-for','x-forwarded-proto','x-real-ip','content-length','sec-fetch-site','sec-fetch-mode','sec-fetch-dest'];
-// 每个 isolate 的内存限流（尽力而为）；正式防护建议在 Cloudflare 控制台为 /api/proxy 加速率限制规则。
-const RL=new Map(),WIN=60e3,MAX_API=20,MAX_IMG=40;
-function limited(ip,kind){const now=Date.now(),k=kind+'|'+ip;let e=RL.get(k);if(!e||now-e.t>WIN){e={t:now,n:0};RL.set(k,e)}e.n++;
-  if(RL.size>5000)for(const[x,v]of RL)if(now-v.t>WIN)RL.delete(x);return e.n>(kind==='img'?MAX_IMG:MAX_API)}
-// 同一机房内共享的计数（Cache API，近似值，非原子）
-async function cacheCount(ip,kind,ctx){try{const c=caches.default,m=Math.floor(Date.now()/WIN),key=new Request(`https://rl.invalid/${kind}/${encodeURIComponent(ip)}/${m}`);
-  const r=await c.match(key),n=(r?+(await r.text())||0:0)+1;const p=c.put(key,new Response(String(n),{headers:{'cache-control':'max-age=120'}}));await p;return n}catch(e){return 0}}
-async function over(ip,kind,ctx){const mem=limited(ip,kind);const n=await cacheCount(ip,kind,ctx);return mem||n>(kind==='img'?MAX_IMG:MAX_API)}
-function sameSite(req){const self=new URL(req.url).host;for(const h of['origin','referer']){const v=req.headers.get(h);if(v){try{return new URL(v).host===self}catch(e){return false}}}return false}
-export async function onRequest(ctx){const {request}=ctx;
-  if(request.method==='OPTIONS')return new Response(null,{status:204});
-  if(!['GET','POST'].includes(request.method))return j(405,'只支持 GET / POST');
-  if(!sameSite(request))return j(403,'只接受本站页面发起的请求');
-  let t;try{t=new URL(request.headers.get('x-target-url')||'')}catch(e){return j(400,'缺少或无效的 x-target-url')}
-  if(t.username||t.password)return j(400,'目标地址不能带账号密码');
-  const official0=OFFICIAL.some(r=>r.test(t.hostname));
-  if(official0?(t.protocol!=='https:'||(t.port&&t.port!=='443')):!/^https?:$/.test(t.protocol))return j(400,official0?'官方接口地址必须是标准 https 地址':'目标地址必须是 http/https 地址');
-  const ip=request.headers.get('cf-connecting-ip')||'0';
-  const img=request.headers.get('x-proxy-kind')==='image';
-  if(img){if(request.method!=='GET')return j(405,'图片下载只支持 GET');
-    if(!IMG_HOSTS.some(r=>r.test(t.hostname)))return j(403,'该图片地址不在允许范围内');
-    if(await over(ip,'img',ctx))return j(429,'请求过于频繁，请稍后再试');
-    const r=await fetch(t.toString(),{redirect:'manual'}).catch(()=>null);const ct=r&&r.headers.get('content-type')||'';
-    if(!r||!r.ok||!/^image\//.test(ct))return j(502,'结果图片下载失败');return new Response(r.body,{headers:{'content-type':ct,'cache-control':'no-store','x-content-type-options':'nosniff'}})}
-  const official=OFFICIAL.some(r=>r.test(t.hostname)),custom=request.headers.get('x-proxy-custom')==='1';
-  if(!official&&!custom)return j(403,'该地址不是官方接口；自定义中转需在设置中选择「自定义」');
-  const path=t.pathname.replace(/\/+$/,'');
-  if(official?!API_PATH.test(path):!/\/(images\/(edits|generations)|models(\/[^/]+(:generateContent)?)?)$/.test(path))return j(403,'该路径不允许通过代理转发');
-  if(custom&&/^(localhost|127\.|10\.|192\.168\.|169\.254\.|\[)/.test(t.hostname))return j(403,'不能转发到内网地址');
-  if(await over(ip,'api',ctx))return j(429,'请求过于频繁，请稍后再试');
-  const h=new Headers();for(const[k,v]of request.headers){const l=k.toLowerCase();if(!DROP.includes(l)&&!l.startsWith('cf-'))h.set(k,v)}
-  try{const r=await fetch(t.toString(),{method:request.method,headers:h,body:request.method==='POST'?request.body:undefined,redirect:'manual'});
-    const oh=new Headers();['content-type'].forEach(k=>r.headers.get(k)&&oh.set(k,r.headers.get(k)));oh.set('cache-control','no-store');
-    return new Response(r.body,{status:r.status,headers:oh})}
-  catch(e){return j(502,'代理无法连接目标服务')}
+// Stateless, same-origin image-provider proxy. Request bodies and credentials
+// are streamed through and are never logged or stored by application code.
+const API_PATH = /^\/(api\/v3|v\d+(beta|alpha)?)\/(images\/(edits|generations)|models\/[^/]+:generateContent)$/;
+const CUSTOM_PATH = /\/(images\/(edits|generations)|models\/[^/]+:generateContent)$/;
+const OFFICIAL = [/^api\.openai\.com$/, /^generativelanguage\.googleapis\.com$/, /^ark\.[a-z0-9-]+\.volces\.com$/, /^ark\.[a-z0-9-]+\.bytepluses\.com$/];
+const IMAGE_HOSTS = [/^oaidalleapiprodscus\.blob\.core\.windows\.net$/, /(^|\.)volces\.com$/, /(^|\.)bytepluses\.com$/, /(^|\.)googleusercontent\.com$/];
+const DROP_HEADERS = new Set(['host', 'x-target-url', 'x-proxy-kind', 'x-proxy-custom', 'cookie', 'origin', 'referer', 'x-forwarded-for', 'x-forwarded-proto', 'x-real-ip', 'content-length', 'sec-fetch-site', 'sec-fetch-mode', 'sec-fetch-dest']);
+const WINDOW_MS = 60_000;
+const MAX_API_REQUESTS = 20;
+const MAX_IMAGE_REQUESTS = 40;
+const MAX_BODY_BYTES = 25 * 1024 * 1024;
+
+function json(status, message) {
+  return new Response(JSON.stringify({ error: { message } }), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
 }
-const j=(s,m)=>new Response(JSON.stringify({error:{message:m}}),{status:s,headers:{'content-type':'application/json; charset=utf-8','cache-control':'no-store'}});
+
+function isSameOrigin(request) {
+  const self = new URL(request.url).origin;
+  const origin = request.headers.get('origin');
+  const referer = request.headers.get('referer');
+  if (!origin && !referer) return false;
+  try {
+    if (origin && new URL(origin).origin !== self) return false;
+    if (referer && new URL(referer).origin !== self) return false;
+    return true;
+  } catch { return false; }
+}
+
+function isPrivateHost(hostname) {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '::1' || host.includes(':')) return true;
+  const match = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!match) return false;
+  const [a, b] = match.slice(1).map(Number);
+  return a === 0 || a === 10 || a === 127 || a >= 224 || (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+}
+
+async function rateLimited(request, kind) {
+  // Approximate per-PoP protection. Add an account-level Cloudflare rate
+  // limiting rule for an atomic global ceiling without changing application code.
+  try {
+    const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(ip));
+    const keyId = [...new Uint8Array(digest).slice(0, 12)].map(v => v.toString(16).padStart(2, '0')).join('');
+    const bucket = Math.floor(Date.now() / WINDOW_MS);
+    const key = new Request(`https://posewear-rate.invalid/${kind}/${keyId}/${bucket}`);
+    const cache = caches.default;
+    const previous = await cache.match(key);
+    const count = (previous ? Number(await previous.text()) || 0 : 0) + 1;
+    await cache.put(key, new Response(String(count), { headers: { 'cache-control': 'max-age=120' } }));
+    return count > (kind === 'image' ? MAX_IMAGE_REQUESTS : MAX_API_REQUESTS);
+  } catch { return false; }
+}
+
+export async function onRequest(context) {
+  const { request } = context;
+  if (request.method === 'OPTIONS') return isSameOrigin(request) ? new Response(null, { status: 204 }) : json(403, 'Cross-origin requests are not allowed.');
+  if (!['GET', 'POST'].includes(request.method)) return json(405, 'Only GET and POST are supported.');
+  if (!isSameOrigin(request)) return json(403, 'Only same-origin requests are accepted.');
+
+  let target;
+  try { target = new URL(request.headers.get('x-target-url') || ''); }
+  catch { return json(400, 'The x-target-url header is missing or invalid.'); }
+  if (target.username || target.password) return json(400, 'Target URLs cannot contain credentials.');
+  const isOfficial = OFFICIAL.some(pattern => pattern.test(target.hostname));
+  if (target.protocol !== 'https:' || target.port && target.port !== '443') return json(400, 'Provider and relay targets must use standard HTTPS.');
+
+  const isImage = request.headers.get('x-proxy-kind') === 'image';
+  if (isImage) {
+    if (request.method !== 'GET') return json(405, 'Image downloads only support GET.');
+    if (!IMAGE_HOSTS.some(pattern => pattern.test(target.hostname))) return json(403, 'The result image host is not allowed.');
+    if (await rateLimited(request, 'image')) return json(429, 'Rate limit reached. Try again shortly.');
+    try {
+      const result = await fetch(target, { redirect: 'manual' });
+      const type = result.headers.get('content-type') || '';
+      if (!result.ok || !type.startsWith('image/')) return json(502, 'The result image could not be downloaded.');
+      return new Response(result.body, { headers: { 'content-type': type, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' } });
+    } catch { return json(502, 'The result image could not be downloaded.'); }
+  }
+
+  const custom = request.headers.get('x-proxy-custom') === '1';
+  if (!isOfficial && !custom) return json(403, 'Select Custom relay before using a non-official endpoint.');
+  if (custom && isPrivateHost(target.hostname)) return json(403, 'Private-network relay targets are not allowed.');
+  const path = target.pathname.replace(/\/+$/, '');
+  if (isOfficial ? !API_PATH.test(path) : !CUSTOM_PATH.test(path)) return json(403, 'This provider path is not allowed.');
+  if (request.method === 'POST') {
+    const length = Number(request.headers.get('content-length') || 0);
+    if (length > MAX_BODY_BYTES) return json(413, 'Upload exceeds the 25 MiB proxy limit.');
+  }
+  if (await rateLimited(request, 'api')) return json(429, 'Rate limit reached. Try again shortly.');
+
+  const headers = new Headers();
+  for (const [key, value] of request.headers) {
+    const lower = key.toLowerCase();
+    if (!DROP_HEADERS.has(lower) && !lower.startsWith('cf-')) headers.set(key, value);
+  }
+  try {
+    const result = await fetch(target, { method: request.method, headers, body: request.method === 'POST' ? request.body : undefined, redirect: 'manual' });
+    const responseHeaders = new Headers({ 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    const type = result.headers.get('content-type');
+    if (type) responseHeaders.set('content-type', type);
+    return new Response(result.body, { status: result.status, headers: responseHeaders });
+  } catch { return json(502, 'The proxy could not reach the provider.'); }
+}
