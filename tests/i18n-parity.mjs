@@ -71,7 +71,7 @@ try {
   await page.click('.tabs [data-tab=costume]');
   await page.waitForFunction(() => APP.st.tab === 'costume' && document.querySelector('#grid .card'));
   const total = await page.evaluate(() => APP.st.list.length);
-  const term = await page.evaluate(() => APP.DATA.costume[0].cat.split(/\s+/)[0]);
+  const term = await page.evaluate(() => APP.DATA.costume[0].id);
   await page.fill('#q', term);
   await page.waitForTimeout(250);
   check('search reduces and matches results', await page.evaluate(total => APP.st.list.length > 0 && APP.st.list.length < total, total));

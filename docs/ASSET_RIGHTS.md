@@ -26,7 +26,7 @@ The fetcher validates all three Git SHAs. `scripts/build-authorized.py` fails cl
 
 ## Current production catalog
 
-`build-info.json` build ID `e122647953de` was produced from:
+`build-info.json` build ID `9066b96c4d38` was produced from:
 
 - 280 pose sets and 270 depth sets;
 - 427 outfits and 57 historical outfits;
